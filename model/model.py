@@ -70,3 +70,26 @@ class MokioMindConfig(PretrainedConfig):
             if self.inference_rope_scaling
             else None
         )
+
+import torch
+import torch.nn as nn
+
+# 继承nn.Module类  RMS是一层
+class RMSNorm(nn.Module):
+    # __init__
+    def __init__(self, dim:int,eps:float = 1e-5):
+        super().__init__()
+        self.dim = dim
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(dim))
+
+    # _norm
+    def _norm(self, x:torch.Tensor):
+        rms = torch.sqrt(torch.mean(x**2, keepdim=True, dim = -1) + self.eps)
+        return rms * x
+    
+    # forward
+    def forward(self, x:torch.Tensor):
+        return self.weight * self._norm(x.float()).type_as(x)
+    
+def precompute_freqs_cis(dim:int, end:int())
