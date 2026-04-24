@@ -92,4 +92,24 @@ class RMSNorm(nn.Module):
     def forward(self, x:torch.Tensor):
         return self.weight * self._norm(x.float()).type_as(x)
     
-def precompute_freqs_cis(dim:int, end:int())
+def precompute_freqs_cis(dim:int, end: int(32*1024), rope_base, rope_scaling: dict|None):
+    # 初始化RoPE参数   
+    # freq 在这里指rope空间波的频率 单位距离转过的角度
+    freqs = 1/(rope_base ** ( torch.arange(0, dim//2, 2)/ dim))
+
+
+
+    # 划分高低维度（低高频率 也就是 高低波长）的指标是 b = L / lambda_i    L是训练长度
+    # lambda_i（波长）为 2 * pi/freq   = 2*pi*rope_base **(2i/dim)
+    # b = L / 2*pi*rope_base **(2i/dim)     rope_base **(2i/dim) = L/(b * 2*pi)
+    # 2i / dim * ln(rope_base) = lnL - lnb - ln(2pi)     
+    # i = dim/2 * (lnL - lnb - ln(2pi)) / ln(rope_base)
+
+
+    # 根据rope_scaling 规则获取超参数
+    if rope_scaling is not None:
+        
+
+
+    # 如果推理长度大于训练长度 需要缩放
+    if end > orig_max:
