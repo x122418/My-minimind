@@ -71,45 +71,140 @@ class MokioMindConfig(PretrainedConfig):
             else None
         )
 
+
 import torch
 import torch.nn as nn
+import math
+
 
 # 继承nn.Module类  RMS是一层
 class RMSNorm(nn.Module):
     # __init__
-    def __init__(self, dim:int,eps:float = 1e-5):
+    def __init__(self, dim: int, eps: float = 1e-5):
         super().__init__()
         self.dim = dim
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(dim))
 
     # _norm
-    def _norm(self, x:torch.Tensor):
-        rms = torch.sqrt(torch.mean(x**2, keepdim=True, dim = -1) + self.eps)
+    def _norm(self, x: torch.Tensor):
+        rms = torch.sqrt(torch.mean(x**2, keepdim=True, dim=-1) + self.eps)
         return rms * x
-    
+
     # forward
-    def forward(self, x:torch.Tensor):
+    def forward(self, x: torch.Tensor):
         return self.weight * self._norm(x.float()).type_as(x)
-    
-def precompute_freqs_cis(dim:int, end: int(32*1024), rope_base, rope_scaling: dict|None):
-    # 初始化RoPE参数   
+
+
+# 预计算旋转表
+def precompute_freqs_cis(dim: int, end: int, rope_base, rope_scaling: dict | None):
+    # 初始化RoPE参数   长度end取值 eg:32k
     # freq 在这里指rope空间波的频率 单位距离转过的角度
-    freqs = 1/(rope_base ** ( torch.arange(0, dim//2, 2)/ dim))
-
-
+    freqs = 1 / (rope_base ** (torch.arange(0, dim, 2).float() / dim))
+    attn_factor = 1.0
 
     # 划分高低维度（低高频率 也就是 高低波长）的指标是 b = L / lambda_i    L是训练长度
     # lambda_i（波长）为 2 * pi/freq   = 2*pi*rope_base **(2i/dim)
     # b = L / 2*pi*rope_base **(2i/dim)     rope_base **(2i/dim) = L/(b * 2*pi)
-    # 2i / dim * ln(rope_base) = lnL - lnb - ln(2pi)     
+    # 2i / dim * ln(rope_base) = lnL - lnb - ln(2pi)
     # i = dim/2 * (lnL - lnb - ln(2pi)) / ln(rope_base)
-
 
     # 根据rope_scaling 规则获取超参数
     if rope_scaling is not None:
+        orig_max, factor, beta_fast, beta_slow = (
+            rope_scaling["original_max_position_embeddings"],
+            rope_scaling["factor"],
+            rope_scaling["beta_fast"],
+            rope_scaling["beta_slow"],
+        )
+
+        # 如果推理长度大于训练长度 需要缩放
+        if end > orig_max:
+            # b 到 i的映射
+            inv_dim = lambda b: (
+                dim / 2 * math.log(orig_max / (b * 2 * math.pi)) / math.log(rope_base)
+            )
+            # 划分高低频 的i边界
+            # i 是 i个旋转对 or i种旋转角度（同一个位置上的） 一共 dim//2 对
+            # low 高频 小的i  不需要缩放
+            # high 低频 大的i 需要缩放
+
+            high = min(dim // 2 - 1, math.ceil(inv_dim(beta_slow)))
+            low = max(0, math.floor(inv_dim(beta_fast)))
+            # 相当于给定两个点计算一个线性函数
+            # 借助一个ramp实现 使得ramp是在0，1 之间插值的
+            ramp = torch.clamp(
+                (torch.arange(dim // 2, device=freqs.device).float() - low)
+                / max(0.001, high - low),
+                0,
+                1,
+            )
+            # 取low -> ramp = 0 -> freq = freq * 1
+            # 取high -> ramp = 1 -> freq = freq / factor
+            # 已有两个点 (0, 1)  (1, 1/factor) 求一次函数
+            freqs = freqs * (1 - (1 - 1 / factor) * ramp)
+
+        # 根据end计算 位置序列
+        t = torch.arange(end, device=freqs.device).float()
+
+        # 考虑不同位置的freqs表格 是 seq_length * Hidden_state//2 维度的 (S, H//2)
+        freqs = torch.outer(t, freqs).float()
+
+        # 但实际旋转时 又要cat一下（因为 (S,H) 尽管H上的两两一对的角度相同，但也需要旋转
+        freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
+
+        freqs_sin = (
+            torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1).float() * attn_factor
+        )
+        return freqs_cos, freqs_sin
+
+
+# 编写RoPE函数 应用旋转表到 q, k 矩阵
+# 旋转二维向量 [a, b]  A角度  转变为 [a*cosA - b*sinA, a*sinA + b*cosA]
+# 工程上 每一个平面 取的基 并不是相邻的 实际是 abcd,ABCD 这种x和x+lenght/2 的对应
+# 这个对应需要注意于cos矩阵的cat方式一致
+def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
+    # [a, b] -> [-b, a] 方便后续旋转的计算
+
+    def rotate_half(x):
+        mid_idx = x.shape[-1] // 2
+        return torch.cat([-x[..., mid_idx:], x[..., :mid_idx]], dim=-1)
+
+    # 考虑q [B, L, N, H],  cos [L, H]  前面注释维度都没考虑多头 这里想了一下
+    # roteteed_vec = [a, b] * cos + [-b, a] * sin
+    # 旋转后向量在 [a, b] [-b, a] 这组垂直基下的坐标自然是 [cos, sin]  相当于重构了坐标系
+    q_embed = q * cos.unsqueeze(unsqueeze_dim) + rotate_half(q) * sin.unsqueeze(
+        unsqueeze_dim
+    )
+    k_embed = k * cos.unsqueeze(unsqueeze_dim) + rotate_half(k) * sin.unsqueeze(
+        unsqueeze_dim
+    )
+    return q_embed, k_embed
+
+
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+    B, S, N, H = x.shape
+    if n_rep == 1:
+        return x
+
+    return x[:, :, :, None, :].expand(B, S, N, n_rep, H).reshape(B, S, N * n_rep, H)
+
+
+class Attention(nn.Module):
+    def __init__(self, args: MokioMindConfig):
+        super().__init__()
+
+        self.num_key_value_heads = (
+            args.num_key_value_heads
+            if args.num_key_value_heads is None
+            else args.num_attention_heads
+        )
+
+        assert args.num_attention_heads % self.num_key_value_heads == 0
         
-
-
-    # 如果推理长度大于训练长度 需要缩放
-    if end > orig_max:
+        self.n_local_heads = args.num_attention_heads
+        self.n_rep = self.n_local_heads // self.num_key_value_heads
+        self.head_dim = args.hidden_size // self.n_local_heads
+        
+        
+        

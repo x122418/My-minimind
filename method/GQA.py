@@ -1,0 +1,36 @@
+import torch
+import torch.nn as nn
+
+# dropout_layer = nn.Dropout(p = 0.5)
+
+# t1 = torch.Tensor([1,2,3])
+# t2 = dropout_layer(t1)
+# print(t2)
+
+# layer = nn.Linear(in_features=3, out_features=5, bias = True)
+# t1 = torch.Tensor([1,2,3])
+# t2 = torch.Tensor([[1,2,3]])
+# out = layer(t2)
+# print(out)
+
+# t = torch.tensor([[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]])
+# print(t.shape)
+# t_view1 = t.view(3,4)
+# print(t_view1)
+
+# t = torch.tensor([[1, 2, 3, 4, 5, 6], [7, 8, 9, 10, 11, 12]])
+# t_transpose = t.transpose(0, 1)
+# print(t_transpose)
+
+# x = torch.tensor([[1,2,3], [4, 5, 6], [7, 8, 9]])
+# print(torch.triu(x))
+
+# print(torch.triu(x, diagonal=1))
+# print(torch.triu(x, diagonal=-1))
+# print(torch.triu(x, diagonal=-2))
+
+x = torch.arange(1, 7)
+y = torch.reshape(x, (2, 3))
+print(y)
+z = torch.reshape(x, (3, -1))
+print(z)
