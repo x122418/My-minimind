@@ -11,7 +11,7 @@ class MokioMindConfig(PretrainedConfig):
         eos_token_id: int = 2,
         hidden_act: str = "silu",
         hidden_size: int = 512,
-        intermediate_size: int = None,
+        intermediate_size: int = 0,
         max_position_embeddings: int = 32768,
         num_attention_heads: int = 8,
         num_hidden_layers: int = 8,
@@ -75,6 +75,7 @@ class MokioMindConfig(PretrainedConfig):
 import torch
 import torch.nn as nn
 import math
+import torch.nn.functional as F
 
 
 # 继承nn.Module类  RMS是一层
@@ -89,7 +90,7 @@ class RMSNorm(nn.Module):
     # _norm
     def _norm(self, x: torch.Tensor):
         rms = torch.sqrt(torch.mean(x**2, keepdim=True, dim=-1) + self.eps)
-        return rms * x
+        return x / rms
 
     # forward
     def forward(self, x: torch.Tensor):
@@ -100,6 +101,7 @@ class RMSNorm(nn.Module):
 def precompute_freqs_cis(dim: int, end: int, rope_base, rope_scaling: dict | None):
     # 初始化RoPE参数   长度end取值 eg:32k
     # freq 在这里指rope空间波的频率 单位距离转过的角度
+    # rope_base 原文取 10000
     freqs = 1 / (rope_base ** (torch.arange(0, dim, 2).float() / dim))
     attn_factor = 1.0
 
@@ -144,17 +146,16 @@ def precompute_freqs_cis(dim: int, end: int, rope_base, rope_scaling: dict | Non
             # 已有两个点 (0, 1)  (1, 1/factor) 求一次函数
             freqs = freqs * (1 - (1 - 1 / factor) * ramp)
 
-        # 根据end计算 位置序列
-        t = torch.arange(end, device=freqs.device).float()
+    # 根据end计算 位置序列
+    t = torch.arange(end, device=freqs.device).float()
 
-        # 考虑不同位置的freqs表格 是 seq_length * Hidden_state//2 维度的 (S, H//2)
-        freqs = torch.outer(t, freqs).float()
+    # 考虑不同位置的freqs表格 是 seq_length * Hidden_state//2 维度的 (S, H//2)
+    freqs = torch.outer(t, freqs).float()
 
-        # 但实际旋转时 又要cat一下（因为 (S,H) 尽管H上的两两一对的角度相同，但也需要旋转
-        freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
-
-        freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1)* attn_factor
-        return freqs_cos, freqs_sin
+    # 但实际旋转时 又要cat一下（因为 (S,H) 尽管H上的两两一对的角度相同，但也需要旋转
+    freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
+    freqs_sin = torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1) * attn_factor
+    return freqs_cos, freqs_sin
 
 
 # 编写RoPE函数 应用旋转表到 q, k 矩阵
@@ -168,7 +169,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
         mid_idx = x.shape[-1] // 2
 
         return torch.cat([-x[..., mid_idx:], x[..., :mid_idx]], dim=-1)
-
 
     # 考虑q [B, L, N, H],  cos [L, H]  前面注释维度都没考虑多头 这里想了一下
     # roteteed_vec = [a, b] * cos + [-b, a] * sin
@@ -201,9 +201,95 @@ class Attention(nn.Module):
         )
 
         assert args.num_attention_heads % self.num_key_value_heads == 0
-        
+
         self.n_local_heads = args.num_attention_heads
         self.n_rep = self.n_local_heads // self.num_key_value_heads
         self.head_dim = args.hidden_size // self.n_local_heads
-        
-    
+
+        self.q_proj = nn.Linear(
+            args.hidden_size, self.n_local_heads * self.head_dim, bias=False
+        )
+        self.k_proj = nn.Linear(
+            args.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
+        )
+        self.v_proj = nn.Linear(
+            args.hidden_size, self.num_key_value_heads * self.head_dim, bias=False
+        )
+        self.o_proj = nn.Linear(
+            self.n_local_heads * self.head_dim, args.hidden_size, bias=False
+        )
+
+        self.drop = args.dropout
+        self.attn_dropout = nn.Dropout(args.dropout)
+        self.residual_dropout = nn.Dropout(args.dropout)
+        self.flash = (
+            hasattr(torch.nn.functional, "scaled_dot_product_attention")
+            and args.flash_attention
+        )
+
+    # 投影 计算kqv
+    # 拆分多头
+    # q k 使用rope
+    # k v 使用repeat  需要注意KV cache
+    # 进行 attention计算 Q @ k^T / sqrt(d)
+    # 最后拼接头 返回结果
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        position_embedding: tuple[torch.Tensor, torch.Tensor],
+        past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
+        use_cache: bool = False,
+        attention_mask: torch.Tensor | None = None,  # [batch_size, kv_len/S]  假设1有效 0无效
+    ):
+        B, S, _ = x.shape
+        xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
+        xq = xq.view(B, S, self.n_local_heads, self.head_dim)
+        xk = xk.view(B, S, self.num_key_value_heads, self.head_dim)
+        xv = xv.view(B, S, self.num_key_value_heads, self.head_dim)
+
+        cos, sin = position_embedding
+        xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
+
+        if past_key_value is not None:
+            # 这意味着直接拼接过去的kv 如果是逐token生成 则要求 当前的kv 是seq_len = 1
+            xk = torch.cat([past_key_value[0], xk], dim=1)
+            xv = torch.cat([past_key_value[1], xv], dim=1)
+        past_kv = (xk, xv) if use_cache else None
+        # xk, xv [B, S + psat_s, N*, H]  (before the next line)
+        xk, xv = repeat_kv(xk, self.n_rep).transpose(1, 2), repeat_kv(
+            xv, self.n_rep
+        ).transpose(1, 2)
+        # xk, xv [B, N*, S + psat_s, H]  (before the next line)
+
+        # xq [B, S, N, H]
+        xq = xq.transpose(1, 2)
+        # xq [B, N, S, H]
+
+        if (
+            S > 1
+            and self.flash
+            and (attention_mask == None or torch.all(attention_mask == 1))
+            and past_key_value == None
+        ):
+            output = F.scaled_dot_product_attention(
+                xq,
+                xk,
+                xv,
+                dropout_p=self.drop if self.training else 0.0,
+                is_causal=True,
+            )
+
+        # 手动实现attention计算   q @ K^T  / sqrt(H)
+        else:
+            scores = xq @ xk.transpose(-1, -2) / math.sqrt(self.head_dim)
+            # [B, N, S, S + past_s]
+            scores[:, :, :, -S:] += torch.triu(
+                torch.full((S, S), float("-inf"), device=scores.device), diagonal=1
+            )
+            # [B, N, S, S] 对这部分scores加掩码    [B, N, S, past_s] 不加掩码 全部看见
+            
+
+
+
+        return past_kv
