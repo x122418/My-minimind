@@ -151,10 +151,17 @@ def precompute_freqs_cis(dim: int, end: int, rope_base, rope_scaling: dict | Non
         freqs = torch.outer(t, freqs).float()
 
         # 但实际旋转时 又要cat一下（因为 (S,H) 尽管H上的两两一对的角度相同，但也需要旋转
+<<<<<<< HEAD
         freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
 
         freqs_sin = (
             torch.cat([torch.sin(freqs), torch.sin(freqs)], dim=-1).float() * attn_factor
+=======
+        freqs_cos = torch.cat(torch.cos(freqs), torch.cos(freqs), dim=-1) * attn_factor
+
+        freqs_sin = (
+            torch.cat(torch.sin(freqs), torch.sin(freqs), dim=-1).float() * attn_factor
+>>>>>>> 8d4f588c7ad8806f64081717a8b9531d96eb4b18
         )
         return freqs_cos, freqs_sin
 
@@ -168,7 +175,11 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
     def rotate_half(x):
         mid_idx = x.shape[-1] // 2
+<<<<<<< HEAD
         return torch.cat([-x[..., mid_idx:], x[..., :mid_idx]], dim=-1)
+=======
+        return torch.cat(-x[..., mid_idx:], x[..., :mid_idx], dim=-1)
+>>>>>>> 8d4f588c7ad8806f64081717a8b9531d96eb4b18
 
     # 考虑q [B, L, N, H],  cos [L, H]  前面注释维度都没考虑多头 这里想了一下
     # roteteed_vec = [a, b] * cos + [-b, a] * sin
@@ -182,7 +193,11 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
     return q_embed, k_embed
 
 
+<<<<<<< HEAD
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
+=======
+def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensotr:
+>>>>>>> 8d4f588c7ad8806f64081717a8b9531d96eb4b18
     B, S, N, H = x.shape
     if n_rep == 1:
         return x
