@@ -151,7 +151,6 @@ def precompute_freqs_cis(dim: int, end: int, rope_base, rope_scaling: dict | Non
         freqs = torch.outer(t, freqs).float()
 
         # 但实际旋转时 又要cat一下（因为 (S,H) 尽管H上的两两一对的角度相同，但也需要旋转
-<<<<<<< HEAD
         freqs_cos = torch.cat([torch.cos(freqs), torch.cos(freqs)], dim=-1) * attn_factor
 
         freqs_sin = (
@@ -195,9 +194,6 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
 <<<<<<< HEAD
 def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
-=======
-def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensotr:
->>>>>>> 8d4f588c7ad8806f64081717a8b9531d96eb4b18
     B, S, N, H = x.shape
     if n_rep == 1:
         return x
