@@ -76,6 +76,7 @@ import torch
 import torch.nn as nn
 import math
 import torch.nn.functional as F
+from transformers.activations import ACT2FN
 
 
 # 继承nn.Module类  RMS是一层
@@ -170,7 +171,7 @@ def apply_rotary_pos_emb(q, k, cos, sin, unsqueeze_dim=1):
 
         return torch.cat([-x[..., mid_idx:], x[..., :mid_idx]], dim=-1)
 
-    # 考虑q [B, L, N, H],  cos [L, H]  前面注释维度都没考虑多头 这里想了一下
+    # 考虑q [B, S, N, H],  cos [S, H]
     # roteteed_vec = [a, b] * cos + [-b, a] * sin
     # 旋转后向量在 [a, b] [-b, a] 这组垂直基下的坐标自然是 [cos, sin]  相当于重构了坐标系
     q_embed = q * cos.unsqueeze(unsqueeze_dim) + rotate_half(q) * sin.unsqueeze(
@@ -219,6 +220,9 @@ class Attention(nn.Module):
             self.n_local_heads * self.head_dim, args.hidden_size, bias=False
         )
 
+        self.q_norm = RMSNorm(self.head_dim, eps=args.rms_norm_eps)
+        self.k_norm = RMSNorm(self.head_dim, eps=args.rms_norm_eps)
+        self.is_causal = True
         self.drop = args.dropout
         self.attn_dropout = nn.Dropout(args.dropout)
         self.residual_dropout = nn.Dropout(args.dropout)
@@ -240,13 +244,16 @@ class Attention(nn.Module):
         position_embedding: tuple[torch.Tensor, torch.Tensor],
         past_key_value: tuple[torch.Tensor, torch.Tensor] | None = None,
         use_cache: bool = False,
-        attention_mask: torch.Tensor | None = None,  # [batch_size, kv_len/S]  假设1有效 0无效
+        attention_mask: (
+            torch.Tensor | None
+        ) = None,  # [batch_size, kv_len or S]  假设1有效 0无效
     ):
         B, S, _ = x.shape
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         xq = xq.view(B, S, self.n_local_heads, self.head_dim)
         xk = xk.view(B, S, self.num_key_value_heads, self.head_dim)
         xv = xv.view(B, S, self.num_key_value_heads, self.head_dim)
+        xq, xk = self.q_norm(xq), self.k_norm(xk)
 
         cos, sin = position_embedding
         xq, xk = apply_rotary_pos_emb(xq, xk, cos, sin)
@@ -277,19 +284,48 @@ class Attention(nn.Module):
                 xk,
                 xv,
                 dropout_p=self.drop if self.training else 0.0,
-                is_causal=True,
+                is_causal=self.is_causal,
             )
 
         # 手动实现attention计算   q @ K^T  / sqrt(H)
         else:
             scores = xq @ xk.transpose(-1, -2) / math.sqrt(self.head_dim)
             # [B, N, S, S + past_s]
-            scores[:, :, :, -S:] += torch.triu(
-                torch.full((S, S), float("-inf"), device=scores.device), diagonal=1
-            )
-            # [B, N, S, S] 对这部分scores加掩码    [B, N, S, past_s] 不加掩码 全部看见
-            
+            if self.is_causal == True:
+                scores[:, :, :, -S:] += torch.triu(
+                    torch.full((S, S), float("-inf"), device=scores.device), diagonal=1
+                )
+                # [B, N, S, S] 对这部分scores加causal掩码    [B, N, S, past_s] 不加掩码 全部看见
+
+            # attention_mask [batch_size, S + past_s]
+            if attention_mask is not None:
+                scores += (1 - attention_mask.unsqueeze(1).unsqueeze(2)) * float("-inf")
+            attn_weights = F.softmax(scores.float(), dim=-1).type_as(xq)
+            attn_weights = self.attn_dropout(attn_weights)
+            output = attn_weights @ xv  # [B, N, S, S+past_s] @ [B, N, S+past_s, H]
+            # [B, N, S, H]
+            output = output.transpose(1, 2).reshape(B, S, -1)  # [B, S, N, H]
+            output = self.o_proj(output)
+            output = self.residual_dropout(output)
+
+        return output, past_kv
 
 
+class FeedForward(nn.Module):
+    def __init__(self, args: MokioMindConfig):
+        super().__init__()
+        # 升维 实际验证最好用2.66倍  并且上取整到64的倍数
+        if args.intermediate_size == 0:
+            intermediate_size = int(args.hidden_size * 8 / 3)
+            args.intermediate_size = 64 * (intermediate_size + 63) // 64
+        self.up_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.down_proj = nn.Linear(args.intermediate_size, args.hidden_size, bias=False)
+        self.gate_proj = nn.Linear(args.hidden_size, args.intermediate_size, bias=False)
+        self.dropout = nn.Dropout(args.dropout)
+        self.act_fn = ACT2FN[args.hidden_act]
 
-        return past_kv
+    def forward(self, x):
+        gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
+        return self.dropout(
+            self.down_proj(gated)
+        )
