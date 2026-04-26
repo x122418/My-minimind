@@ -150,7 +150,7 @@ def precompute_freqs_cis(dim: int, end: int, rope_base, rope_scaling: dict | Non
     # 根据end计算 位置序列
     t = torch.arange(end, device=freqs.device).float()
 
-    # 考虑不同位置的freqs表格 是 seq_length * Hidden_state//2 维度的 (S, H//2)
+    # 考虑不同位置的freqs表格 是 seq_length * Hidden_size//2 维度的 (S, H//2)
     freqs = torch.outer(t, freqs).float()
 
     # 但实际旋转时 又要cat一下（因为 (S,H) 尽管H上的两两一对的角度相同，但也需要旋转
@@ -329,3 +329,20 @@ class FeedForward(nn.Module):
         return self.dropout(
             self.down_proj(gated)
         )
+
+class MinimindBlock(nn.Module):
+    def __init__(self, config: MokioMindConfig):
+        super().__init__()
+        self.hidden_size = config.hidden_size
+        self.num_attention_heads = config.num_attention_heads
+        self.input_rmsnorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+        self.attn_output_rmsnorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
+        self.attn = Attention(config)
+        self.mlp = FeedForward(config)
+    
+    def forward(self, hidden_states, position_embedding, past_key_value,
+        use_cache, attention_mask):
+        residuals = hidden_states
+        
+        
+        return output, past_key_value
