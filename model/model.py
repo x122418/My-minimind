@@ -326,9 +326,8 @@ class FeedForward(nn.Module):
 
     def forward(self, x):
         gated = self.act_fn(self.gate_proj(x)) * self.up_proj(x)
-        return self.dropout(
-            self.down_proj(gated)
-        )
+        return self.dropout(self.down_proj(gated))
+
 
 class MinimindBlock(nn.Module):
     def __init__(self, config: MokioMindConfig):
@@ -339,10 +338,27 @@ class MinimindBlock(nn.Module):
         self.attn_output_rmsnorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.attn = Attention(config)
         self.mlp = FeedForward(config)
-    
-    def forward(self, hidden_states, position_embedding, past_key_value,
-        use_cache, attention_mask):
+
+    def forward(
+        self,
+        hidden_states,
+        position_embedding,
+        past_key_value,
+        use_cache,
+        attention_mask,
+    ):
         residuals = hidden_states
-        
-        
+
+        hidden_states, past_key_value = self.attn(
+            self.input_rmsnorm(hidden_states),  # pre-norm
+            position_embedding,
+            past_key_value,
+            use_cache,
+            attention_mask,
+        )
+
+        hidden_states = hidden_states + residuals
+        # post-attn norm  + residuals
+        output = self.mlp(self.attn_output_rmsnorm(hidden_states)) + hidden_states
+
         return output, past_key_value
