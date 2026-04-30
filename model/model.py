@@ -1,6 +1,5 @@
 from transformers import PretrainedConfig
 
-
 class MokioMindConfig(PretrainedConfig):
     model_type = "mokiomind"
 
@@ -330,7 +329,7 @@ class FeedForward(nn.Module):
 
 
 class MinimindBlock(nn.Module):
-    def __init__(self, config: MokioMindConfig):
+    def __init__(self, layer_id: int , config: MokioMindConfig):
         super().__init__()
         self.hidden_size = config.hidden_size
         self.num_attention_heads = config.num_attention_heads
@@ -362,3 +361,60 @@ class MinimindBlock(nn.Module):
         output = self.mlp(self.attn_output_rmsnorm(hidden_states)) + hidden_states
 
         return output, past_key_value
+    
+class MokioMiniModel(nn.Module):
+    freqs_cos: torch.Tensor
+    freqs_sin: torch.Tensor
+    def __init__(self, config: MokioMindConfig):
+        super().__init__()
+        
+        self.embed = nn.Embedding(config.vocab_size, config.hidden_size)
+        self.dropout = nn.Dropout(config.dropout)
+        self.layers = nn.ModuleList([MinimindBlock(l, config)  for l in range(config.num_hidden_layers)])
+        self.norm = RMSNorm(config.hidden_size, config.rms_norm_eps)
+
+        freqs_cos, freqs_sin = precompute_freqs_cis(
+            config.hidden_size//config.num_attention_heads,
+            config.max_position_embeddings,
+            rope_base=config.rope_theta,
+            rope_scaling=config.rope_scaling,
+        )
+
+        self.register_buffer('freqs_cos', freqs_cos, persistent=False)
+        self.register_buffer('freqs_sin', freqs_sin, persistent=False)
+
+    def forward(self, input_ids: torch.Tensor|None = None,
+                attn_mask:torch.Tensor|None = None, 
+                past_key_values: list[tuple[torch.Tensor, torch.Tensor] | None] | None = None,
+                 use_cache:bool = False, **kwargs):
+        
+        if input_ids is None:
+            raise ValueError("input_ids cannot be None")
+        B, S = input_ids.shape
+        
+        if hasattr(past_key_values, 'layers'):
+            past_key_values = None
+
+        # past_key_values 为 不同（pastk, pastv) 组成的列表 （一共k层数 block的重复次数）
+        past_key_values = past_key_values or ([None] * len(self.layers)) # type: ignore[assignment]
+
+        start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0# type: ignore[assignment]
+
+        # text embedding + dropout
+        hidden_states = self.dropout(self.embed(input_ids))
+
+        position_embeddings = (self.freqs_cos[start_pos:start_pos+S],
+                               self.freqs_sin[start_pos:start_pos+S])
+
+        presents = []
+        for layer_id, (layer, past_key_value) in enumerate(zip(self.layers, past_key_values)):# type: ignore[assignment]
+            hidden_states, present = layer(
+                hidden_states,
+                position_embeddings,
+                past_key_value,
+                use_cache,
+                attn_mask,
+            )
+            presents.append(present)        
+
+        return hidden_states, presents
