@@ -47,4 +47,3 @@ class PretrainDateset(Dataset):
             'attention_mask': attn_mask,
             'labels': labels
         }
-        
