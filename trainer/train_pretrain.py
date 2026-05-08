@@ -53,7 +53,8 @@ def trian_epoch(epoch, loader, iters, start_step=0, wanbd=None):
             param_group['lr'] = lr
         
         with autocasts_ctx:
-            # 向前传播
+            # 前向传播
+            res = model(in)
             
             # 计算loss
             # 反向传播
