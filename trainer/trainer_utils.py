@@ -20,7 +20,7 @@ def Logger(content):
 
 # 动态学习率计算
 def get_lr(current_step, total_steps, lr):
-    return lr * (0.1 + 0.45 * (1 + math.cos(math.pi + current_step / total_steps)))
+    return lr * (0.1 + 0.45 * (1 + math.cos(math.pi * current_step / total_steps)))
 
 # 初始化分布式
 def init_distributed_mode():

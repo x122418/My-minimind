@@ -475,8 +475,7 @@ class MiniMindcausallm(PreTrainedModel, GenerationMixin):
                 shift_logits.view(-1, shift_logits.size(-1)),   # logits 和 labels对齐
                 shift_labels.view(-1),
                 ignore_index=-100,
-            )  
-            
+            ) 
 
         output = CausalLMOutputWithPast(
             loss = loss,

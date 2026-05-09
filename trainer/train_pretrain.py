@@ -58,7 +58,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wanbd=None):
         
         with autocast_ctx:
             # 前向传播
-            res = model(input_ids = input_ids, attn_mask = attention_mask, labels = labels)
+            res = model(input_ids = input_ids, labels = labels)
             # 计算loss
             loss = res.loss
             if getattr(res, 'aux_loss', 0.0):
@@ -155,7 +155,7 @@ if __name__ == "__main__":
         help="训练设备",
     )
     parser.add_argument("--dtype", type=str, default="bfloat16", help="混合精度类型")
-    parser.add_argument("--num_workers", type=int, default=1, help="数据加载线程数")
+    parser.add_argument("--num_workers", type=int, default=8, help="数据加载线程数")
 
     # ========== 训练策略参数 ==========
     parser.add_argument(
