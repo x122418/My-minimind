@@ -306,9 +306,9 @@ class Attention(nn.Module):
             attn_weights = self.attn_dropout(attn_weights)
             output = attn_weights @ xv  # [B, N, S, S+past_s] @ [B, N, S+past_s, H]
             # [B, N, S, H]
-            output = output.transpose(1, 2).reshape(B, S, -1)  # [B, S, N, H]
-            output = self.o_proj(output)
-            output = self.residual_dropout(output)
+        output = output.transpose(1, 2).reshape(B, S, -1)  # [B, S, N, H] -> [B, S, N*H]
+        output = self.o_proj(output)   # 合并投影 dim一般不变
+        output = self.residual_dropout(output)
 
         return output, past_kv
 
@@ -447,8 +447,8 @@ class MiniMindcausallm(PreTrainedModel, GenerationMixin):
     def forward(
         self,
         input_ids: torch.Tensor | None,
-        attn_mask: torch.Tensor | None,
-        past_key_values: list[tuple[torch.Tensor, torch.Tensor] | None],
+        attn_mask: torch.Tensor | None = None,
+        past_key_values: list[tuple[torch.Tensor, torch.Tensor] | None] = None,
         use_cache: bool = False,
         logits_to_keep: int | torch.Tensor = 0,
         labels: torch.Tensor|None = None,
@@ -461,18 +461,18 @@ class MiniMindcausallm(PreTrainedModel, GenerationMixin):
         # logits to keep 是正整数 保留 最后n位置
         # 如果是tensor 就保留所有位置
         slice_indices = (
-            slice(-logits_to_keep)
-            if isinstance(logits_to_keep, int) and logits_to_keep > 0
+            slice(-logits_to_keep, None)
+            if isinstance(logits_to_keep, int)
             else logits_to_keep
         )
         logits = self.lm_head(hidden_states[:, slice_indices, :])
-        
         loss = None
+        
         if labels is not None:
             shift_logits = logits[..., :-1, :].contiguous()   # B, S-1, vocab_size
-            shift_labels = labels[..., 1:, :].contiguous()    # B, S-1
+            shift_labels = labels[..., 1:].contiguous()    # B, S-1
             loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_logits.view(-1, shift_logits.size(-1)),   # logits 和 labels对齐
                 shift_labels.view(-1),
                 ignore_index=-100,
             )

@@ -11,7 +11,7 @@ import torch
 import torch.distributed as dist  # 分布式训练支持
 from contextlib import nullcontext  # 上下文管理器
 from torch import optim  # 优化器
-from torch.nn.parallel import DistributedDataParall el  # 分布式数据并行
+from torch.nn.parallel import DistributedDataParallel  # 分布式数据并行
 from torch.utils.data import DataLoader, DistributedSampler  # 数据加载器
 
 from model.model import MokioMindConfig
@@ -33,7 +33,7 @@ warnings.filterwarnings("ignore")
 
 def train_epoch(epoch, loader, iters, start_step=0, wanbd=None):
     start_time = time.time()
-    # epoch 为当前轮次计数  iters为每轮的遍历batch个数  args.epoch为总的epoch数量
+    # epoch 为当前轮次计数  iters为每轮的遍历batch个数  args.epochs为总的epoch数量
     
     # 遍历数据批次循环
     for step, batch in enumerate(
@@ -49,18 +49,20 @@ def train_epoch(epoch, loader, iters, start_step=0, wanbd=None):
 
         lr = get_lr(
             current_step=iters * epoch + step,
-            total_steps=args.epoch * iters,
+            total_steps=args.epochs * iters,
             lr=args.learning_rate,
         )
         
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
         
-        with autocasts_ctx:
+        with autocast_ctx:
             # 前向传播
-            res = model(input_ids = input_ids, attention_mask = attention_mask, labels = labels)
+            res = model(input_ids = input_ids, attn_mask = attention_mask, labels = labels)
             # 计算loss
-            loss = res.loss + res.aux_loss
+            loss = res.loss
+            if getattr(res, 'aux_loss', 0.0):
+                loss += res.aux_loss
             loss = loss/args.accumulation_steps  # 梯度累积带来的缩小
             
         # 反向传播
@@ -181,7 +183,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--data_path",
         type=str,
-        default="../dataset/pretrain_hq.jsonl",  # ！修正：原"dataset/..."缺少../前缀
+        default="../dataset/pretrain_t2t_mini.jsonl",  # ！修正：原"dataset/..."缺少../前缀
         help="预训练数据路径",
     )
     parser.add_argument(
@@ -258,7 +260,7 @@ if __name__ == "__main__":
     - autocast: 自动选择精度，关键运算用float32
     """
     device_type = "cuda" if "cuda" in args.device else "cpu"
-    dtyep = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
+    dtype = torch.bfloat16 if args.dtype == "bfloat16" else torch.float16
     
     # 📚 上下文管理器知识点
     # CPU不支持autocast，使用nullcontext作为空操作

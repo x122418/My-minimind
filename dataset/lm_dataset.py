@@ -11,7 +11,7 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # 全局预处理 / 后处理工具函数
 # ──────────────────────────────────────────────────────────────────────────────
 
-class PretrainDateset(Dataset):
+class PretrainDataset(Dataset):
     # init
     def __init__(self, data_path, tokenizer, max_length = 512):
         super().__init__()
@@ -34,14 +34,15 @@ class PretrainDateset(Dataset):
     # 加入PAD，EOS，BOS
         tokens = [self.tokenizer.bos_token_id] + tokens + [self.tokenizer.eos_token_id]
         input_ids = tokens + [self.tokenizer.pad_token_id] * (self.max_length - len(tokens))
-        input_ids = torch.Tensor(input_ids, dtype = torch.long)
+        input_ids = torch.tensor(input_ids, dtype = torch.long)
     
     # 自行编写labels, prevent pad being computed in loss
         labels = input_ids.clone()
-        labels = tokens[tokens == self.tokenizer.pad_token_id] = -100
+        labels[input_ids == self.tokenizer.pad_token_id] = -100
     # 编写attn_mask, 标记有效位置和PAD  (非PAD为1 PAD为0)
         attn_mask = (input_ids != self.tokenizer.pad_token_id).long()
     # 返回input_id, attn_mask, labels
+
         return {
             'input_ids': input_ids,
             'attention_mask': attn_mask,
