@@ -8,3 +8,8 @@ wheels/
 
 # Virtual environments
 .venv
+# 忽略权重目录
+checkpoints/
+out/
+# 忽略数据集文件
+dataset/*.jsonl
