@@ -40,11 +40,11 @@ def train_epoch(epoch, loader, iters, start_step=0, wanbd=None):
         loader, start=start_step + 1
     ):  
         input_ids = batch['input_ids']
-        attention_mask = batch['attention_mask']
+        # attention_mask = batch['attention_mask']
         labels = batch['labels']
         # 将数据移动到指定device 一般是GPU
         input_ids = input_ids.to(args.device)
-        attention_mask = attention_mask.to(args.device)
+        # attention_mask = attention_mask.to(args.device)
         labels = labels.to(args.device)
 
         lr = get_lr(

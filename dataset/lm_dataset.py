@@ -40,11 +40,10 @@ class PretrainDataset(Dataset):
         labels = input_ids.clone()
         labels[input_ids == self.tokenizer.pad_token_id] = -100
     # 编写attn_mask, 标记有效位置和PAD  (非PAD为1 PAD为0)
-        attn_mask = (input_ids != self.tokenizer.pad_token_id).long()
+        # attn_mask = (input_ids != self.tokenizer.pad_token_id).long()
     # 返回input_id, attn_mask, labels
 
         return {
             'input_ids': input_ids,
-            'attention_mask': attn_mask,
             'labels': labels
         }

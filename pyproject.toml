@@ -15,10 +15,10 @@ dependencies = [
 [tool.uv]
 # 注册 PyTorch CUDA 索引
 [[tool.uv.index]]
-name = "pytorch-cu126"
-url = "https://download.pytorch.org/whl/cu126"
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
 explicit = true
 
 [tool.uv.sources]
 # 告诉 uv 这些包从专用索引获取
-torch = [{ index = "pytorch-cu126" }]
+torch = [{ index = "pytorch-cu128" }]
