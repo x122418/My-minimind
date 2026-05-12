@@ -82,7 +82,7 @@ def train_epoch(epoch, loader, iters, start_step=0, wanbd=None):
             current_loss = loss.item() * args.accumulation_steps
             current_lr = optimizer.param_groups[-1]['lr']
             
-            eta_min = spend_time / step * iters //60 - spend_time //60
+            eta_min = (spend_time / (step - start_step) * (iters - step)) // 60
             
             Logger(
                 f"Epoch:[{epoch+1}/{args.epochs}]({step}/{iters}) loss:{current_loss:.6f} lr:{current_lr:.12f} epoch_remaining_time:{eta_min}"
