@@ -79,6 +79,7 @@ import torch.nn.functional as F
 from transformers.activations import ACT2FN
 from transformers import PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
+import torch.nn.init as init
 
 
 # 继承nn.Module类  RMS是一层
@@ -307,7 +308,7 @@ class Attention(nn.Module):
             output = attn_weights @ xv  # [B, N, S, S+past_s] @ [B, N, S+past_s, H]
             # [B, N, S, H]
         output = output.transpose(1, 2).reshape(B, S, -1)  # [B, S, N, H] -> [B, S, N*H]
-        output = self.o_proj(output)   # 合并投影 dim一般不变
+        output = self.o_proj(output)  # 合并投影 dim一般不变
         output = self.residual_dropout(output)
 
         return output, past_kv
@@ -433,6 +434,100 @@ class MokioMiniModel(nn.Module):
         return hidden_states, presents
 
 
+class MoeGate(nn.Module):
+    def __init__(self, config: MokioMindConfig):
+        super().__init__()
+        self.config = config
+        self.top_k = config.num_experts_per_tok
+        self.n_routed_experts = config.n_routed_experts
+
+        self.scoring_func = config.scoring_func
+        self.alpha = config.aux_loss_alpha
+        self.seq_aux = config.seq_aux
+        self.norm_topk_prob = config.norm_topk_prob
+
+        self.weight = nn.Linear(config.hidden_size, self.n_routed_experts, bias=False)
+        # 手动初始化
+        init.kaiming_uniform_(self.weight.weight, a=math.sqrt(5))
+
+    def forward(self, hidden_states: torch.Tensor):
+        B, S, H = hidden_states.shape
+        # 【B*S, H】展平方便后续计算 每个token对应的专家
+        hidden_states = hidden_states.view(-1, H)
+        logits = self.weight(hidden_states)    # [B*S, n_exp]
+
+        if self.scoring_func == "softmax":
+            scores = F.softmax(logits, dim=-1) # [B*S, n_exp]
+        else:
+            raise NotImplementedError(
+                f"insupportable scoring function for MoE gating: {self.scoring_func}"
+            )
+        # topk_weight [B*S, k]    topk_idx [B*S, k]
+        topk_weight, topk_idx = torch.topk(scores, self.top_k, -1, sorted=False)
+
+        if self.top_k > 1 and self.norm_topk_prob:
+            dominator = topk_weight.sum(dim=-1, keepdim=True) + 1e-20
+            topk_weight = topk_weight / dominator
+
+        if self.training and self.alpha > 0:
+            scores_for_aux = scores     # [B*S, n_exp]
+            aux_topk = self.top_k
+            topk_idx_for_aux_loss = topk_idx.view(
+                B, -1
+            )  # 将batch 内的token 对应的专家ID展平     [B, S*k]
+
+            if self.seq_aux: # 每个batch内部的负载均衡
+                scores_for_seq_aux = scores_for_aux.view(B, S, -1)
+                # 计数专家被分到token的数量
+                count_exp = torch.zeros(
+                    B, self.n_routed_experts, device=hidden_states.device
+                )
+                count_exp.scatter_add_(
+                    dim=1,
+                    index=topk_idx_for_aux_loss,
+                    src=torch.ones(B, S * self.top_k, device=hidden_states.device),
+                ).div(
+                    S * self.top_k / self.n_routed_experts
+                )  # [B, n_exp]
+
+                aux_loss = (count_exp * scores_for_seq_aux.mean(dim=1)).sum(
+                    dim=1
+                ).mean() * self.alpha
+
+            else: # 全局级别（跨batch）的负载均衡
+                flat_idx = topk_idx_for_aux_loss.view(-1) # [B*S*k]
+                mask_count_exp = F.one_hot(flat_idx, num_classes=self.n_routed_experts) # [B*S*k, n_exp]
+                count_exp = mask_count_exp.float().mean(0) # [n_exp]  每个专家被选中平均次数
+                Pi = scores_for_aux.mean(0)
+                fi = count_exp * self.n_routed_experts
+
+                aux_loss = (fi*Pi).sum() * self.alpha
+        else:
+            aux_loss = torch.tensor(0.0, device=scores.device)
+
+        return topk_idx, topk_weight, aux_loss
+
+class MoEFeedForward(nn.Module):
+    def __init__(self, config:MokioMindConfig):
+        super().__init__()
+        self.config = config
+
+        self.experts = nn.ModuleList([
+            FeedForward(config) for _ in range(config.n_routed_experts)
+        ])
+        self.gate = MoeGate(config)
+        if config.n_shared_experts > 0:
+            self.shared_experts = nn.ModuleList(
+                [FeedForward(config) for _ in range(config.n_shared_experts)]
+            )
+    def forward(self, x):
+        B, S, H = x.shape
+        topk_idx, topk_weight, aux_loss = self.gate(x)
+        
+
+
+
+
 class MiniMindcausallm(PreTrainedModel, GenerationMixin):
     config_class = MokioMindConfig
 
@@ -451,7 +546,7 @@ class MiniMindcausallm(PreTrainedModel, GenerationMixin):
         past_key_values: list[tuple[torch.Tensor, torch.Tensor] | None] = None,
         use_cache: bool = False,
         logits_to_keep: int | torch.Tensor = 0,
-        labels: torch.Tensor|None = None,
+        labels: torch.Tensor | None = None,
         **kwargs,
     ):
         hidden_states, past_key_values = self.model(
@@ -467,21 +562,21 @@ class MiniMindcausallm(PreTrainedModel, GenerationMixin):
         )
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         loss = None
-        
+
         if labels is not None:
-            shift_logits = logits[..., :-1, :].contiguous()   # B, S-1, vocab_size
-            shift_labels = labels[..., 1:].contiguous()    # B, S-1
+            shift_logits = logits[..., :-1, :].contiguous()  # B, S-1, vocab_size
+            shift_labels = labels[..., 1:].contiguous()  # B, S-1
             loss = F.cross_entropy(
-                shift_logits.view(-1, shift_logits.size(-1)),   # logits 和 labels对齐
+                shift_logits.view(-1, shift_logits.size(-1)),  # logits 和 labels对齐
                 shift_labels.view(-1),
                 ignore_index=-100,
-            ) 
+            )
 
         output = CausalLMOutputWithPast(
-            loss = loss,
+            loss=loss,
             logits=logits,
-            past_key_values=past_key_values, # type: ignore[assignment]
-            hidden_states=hidden_states
+            past_key_values=past_key_values,  # type: ignore[assignment]
+            hidden_states=hidden_states,
         )
 
         return output
