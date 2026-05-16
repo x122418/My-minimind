@@ -340,7 +340,7 @@ class MinimindBlock(nn.Module):
         self.input_rmsnorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.attn_output_rmsnorm = RMSNorm(self.hidden_size, eps=config.rms_norm_eps)
         self.attn = Attention(config)
-        self.mlp = FeedForward(config)
+        self.mlp = FeedForward(config) if config.use_moe == 0 else MoEFeedForward(config)
 
     def forward(
         self,
@@ -520,12 +520,77 @@ class MoEFeedForward(nn.Module):
             self.shared_experts = nn.ModuleList(
                 [FeedForward(config) for _ in range(config.n_shared_experts)]
             )
-    def forward(self, x):
+    def forward(self, x:torch.Tensor):
         B, S, H = x.shape
         topk_idx, topk_weight, aux_loss = self.gate(x)
         
+        # copy for shared experts
+        identity = x
 
-
+        x = x.view(-1, H)  # [B*S, H]  展平token级别处理
+        flat_topk_idx = topk_idx.view(-1)  # [B*S*k]
+        
+        if self.training:
+            x = x.repeat_interleave(self.config.num_experts_per_tok, dim = 0) # [B*S*k, H]
+            y = torch.empty_like(x, dtype=x.dtype)
+            
+            for i, expert in enumerate(self.experts):
+                expert_out = expert(x[flat_topk_idx == i])
+                if expert_out.shape[0] > 0:
+                    y[flat_topk_idx == i] = expert_out.to(y.dtype)
+                    
+            # topk_weight [B*S, k]  -> [B*S, k, 1],  y  [B*S*k, H] -> [B*S, k, H]
+            # 将不同expert结果加权 sum
+            y = y.view(*topk_weight, -1) * topk_weight.unsqueeze(-1).sum(dim = 1)
+            y = y.view(B, S, H)
+        else:
+            y = self.moe_infer(x, flat_topk_idx, topk_weight.view(-1, 1)).view(B,S,H)
+        if self.config.n_shared_experts > 0:
+            for expert in self.shared_experts:
+                y += expert(identity)
+        self.aux_loss = aux_loss
+        return y
+            
+            
+    @torch.no_grad()
+    def moe_infer(self, x, flat_expert_indices, flat_expert_weight):
+        # x: [B*S, H]
+        # flat_expert_indices: [B*S*top_k]  每个元素是专家ID
+        # flat_expert_weights: [B*S*top_k, 1]
+        
+        # 合并同专家的位置
+        expert_cache = torch.zeros_like(x)
+        
+        # 对专家索引进行排序，最后是[0,0,0,1,1,2,2,2,...]这样的顺序 这里取出其对应索引
+        idxs = flat_expert_indices.argsort() # [B*S*top_k]
+        
+        counts = flat_expert_indices.bincount() #[n_exp]
+        
+        tokens_per_expert = counts.cpu().numpy().cumsum(0) # 转化为累积和
+        
+        # 计算原始的token编号
+        token_idxs = idxs // self.config.num_experts_per_tok
+        
+        # 对打包好的专家顺序来处理
+        for i, end_idx in enumerate(tokens_per_expert):
+            start_idx = 0 if i == 0 else tokens_per_expert[i-1]
+            if start_idx == end_idx:
+                continue
+            expert = self.experts[i]
+            exp_token_idx = token_idxs[start_idx:end_idx] 
+            expert_tokens = x[exp_token_idx]
+            expert_out = expert(expert_tokens).to(expert_cache.dtype)
+            
+            expert_out.mul_(flat_expert_weight[idxs[start_idx:end_idx]])
+            
+            # expert_cache [B*S, H],  idx  need tobe [B*S, H]   expert_out
+            expert_cache.scatter_add_(
+                0, exp_token_idx.view(-1, 1).repeat(1, x.shape[-1]), expert_out
+            )
+        
+        return expert_cache
+        
+        
 
 
 class MiniMindcausallm(PreTrainedModel, GenerationMixin):
