@@ -11,6 +11,55 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 # 全局预处理 / 后处理工具函数
 # ──────────────────────────────────────────────────────────────────────────────
 
+def pre_processing_chat(conversations, add_system_ratio=0.2):
+    """
+    对话前处理：以一定概率随机插入 system 消息。
+
+    特点：
+    - 只有当首条消息不是 system 角色时才可能插入。
+    - add_system_ratio 控制插入概率（默认 20%），引入随机性可提升模型
+      对有/无 system prompt 两种情况的泛化能力。
+    - system 内容从预定义的中英文 prompt 池中随机抽取，覆盖不同表达风格。
+    """
+    SYSTEM_PROMPTS = [
+        "你是一个知识丰富的AI，尽力为用户提供准确的信息。",
+        "你是minimind，一个小巧但有用的语言模型。",
+        "你是一个专业的AI助手，请提供有价值的回答。",
+        "你是minimind，请尽力帮助用户解决问题。",
+        "你是一个可靠的AI，请给出准确的回答。",
+        "You are a helpful AI assistant.",
+        "You are minimind, a lightweight intelligent assistant.",
+        "You are a friendly chatbot. Please answer the user's questions carefully.",
+        "You are a knowledgeable AI. Try your best to provide accurate information.",
+        "You are minimind, a small but useful language model.",
+    ]
+    if conversations and conversations[0].get("role") != "system":
+        if random.random() < add_system_ratio:
+            return [
+                {"role": "system", "content": random.choice(SYSTEM_PROMPTS)}
+            ] + conversations
+    return conversations
+
+
+def post_processing_chat(prompt_content, empty_think_ratio=0.05):
+    """
+    对话后处理：清理模板渲染后多余的空 <think> 块。
+
+    特点：
+    - 针对带 CoT（chain-of-thought）格式的模型，apply_chat_template 有时会
+      渲染出 "<think>\n\n</think>\n\n" 这样的空思考块占位符。
+    - 大部分情况下（概率 1 - empty_think_ratio = 95%）直接删除该空块，
+      防止模型学到"无意义思考"的坏习惯。
+    - 保留少量空思考块（empty_think_ratio = 5%），让模型也能处理该边界情况。
+    """
+    if (
+        "<think>\n\n</think>\n\n" in prompt_content
+        and random.random() > empty_think_ratio
+    ):
+        prompt_content = prompt_content.replace("<think>\n\n</think>\n\n", "")
+    return prompt_content
+
+
 class PretrainDataset(Dataset):
     # init
     def __init__(self, data_path, tokenizer, max_length = 512):
