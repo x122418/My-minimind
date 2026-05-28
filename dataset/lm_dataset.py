@@ -96,3 +96,49 @@ class PretrainDataset(Dataset):
             'input_ids': input_ids,
             'labels': labels
         }
+    
+class SFTDataset(Dataset):
+    def __init__(self, jsonl_path, tokenizer, max_length = 1024): 
+        super().__init__()
+        self.tokenizer = tokenizer
+        self.max_length = max_length
+        self.samples = self.load_dataset("json", data_files=jsonl_path, split = "train")
+        self.bos_id = tokenizer(f"{tokenizer.bos_token}assistant\n", add_special_tokens = False).input_ids
+        self.eos_id = tokenizer(f"{tokenizer.eos_token}\n", add_special_tokens = False).input_ids
+    def __len__(self):
+        return len(self.samples)
+    
+    def create_chat_prompt(self, conversations):
+        messages = conversations.copy()
+        tools = (
+            conversations[0]['function']
+            if (
+                conversations
+                and conversations[0].get("role")!= "system"
+                and conversations[0].get("function")
+            ) else None
+        )
+        return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False, tools = tools)
+    
+    def generate_labels(self, input_ids):
+        # 让所有input_id 都为 -100
+        labels = [-100] * len(input_ids)
+        i = 0
+        while i<len(input_ids):
+            if input_ids[i:i + len(self.bos_id)] == self.bos_id:
+                start = i + len(self.bos_id)
+                end = start
+                # 向后扫描 找到eos位置
+                while end < len(input_ids):
+                    if input_ids[end:end + len(self.eos_id)] == self.eos_id:
+                        break
+                    end += 1
+                # 将中间label改为有效
+                for j in range(start, min(end + len(self.eos_id), self.max_length)):
+                    labels[j] = input_ids[j]
+                i = end + len(self.eos_id) if end < len(input_ids) else len(input_ids)
+            # 如果没有找到bos 则继续向后寻找
+            else:
+                i += 1
+        return labels
+    def 
