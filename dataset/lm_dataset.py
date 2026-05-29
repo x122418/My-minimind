@@ -153,4 +153,5 @@ class SFTDataset(Dataset):
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
         input_ids += [self.tokenizer.pad_token_id]*(self.max_length - len(input_ids))
         # 生成label 只让assistant加入loss计算
-        labels=
+        labels=self.generate_labels(input_ids=)
+        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
