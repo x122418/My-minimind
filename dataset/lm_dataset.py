@@ -141,4 +141,16 @@ class SFTDataset(Dataset):
             else:
                 i += 1
         return labels
-    def 
+    def __getitem__(self, index):
+        sample = self.samples[index]
+        # 是否需要添加随机syetem_prompt
+        conversations = pre_processing_chat(sample['conversation'])
+        # 用chat_template 把对话转为文本
+        prompt = self.create_chat_prompt(conversations)
+        # 清理think块
+        prompt = post_processing_chat(prompt)
+        # tokenizer 截断 补充pad
+        input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
+        input_ids += [self.tokenizer.pad_token_id]*(self.max_length - len(input_ids))
+        # 生成label 只让assistant加入loss计算
+        labels=
