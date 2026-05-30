@@ -587,8 +587,19 @@ class MokioMiniModel(nn.Module):
                 attn_mask,
             )
             presents.append(present)
+        hidden_states = self.norm(hidden_states)
+        aux_loss = sum(
+            [
+                layer.mlp.aux_loss
+                for layer in self.layers
+                if isinstance(
+                    layer.mlp, MoEFeedForward
+                )
+            ],
+            hidden_states.new_zeros(1).squeeze(),
+        )
 
-        return hidden_states, presents
+        return hidden_states, presents, aux_loss
 
 
 class MiniMindcausallm(PreTrainedModel, GenerationMixin):
@@ -612,7 +623,7 @@ class MiniMindcausallm(PreTrainedModel, GenerationMixin):
         labels: torch.Tensor | None = None,
         **kwargs,
     ):
-        hidden_states, past_key_values = self.model(
+        hidden_states, past_key_values, aux_loss = self.model(
             input_ids, attn_mask, past_key_values, use_cache, **kwargs
         )
 
@@ -641,5 +652,6 @@ class MiniMindcausallm(PreTrainedModel, GenerationMixin):
             past_key_values=past_key_values,  # type: ignore[assignment]
             hidden_states=hidden_states,
         )
-
+        output.aux_loss = aux_loss
+        
         return output
