@@ -102,24 +102,22 @@ class SFTDataset(Dataset):
         super().__init__()
         self.tokenizer = tokenizer
         self.max_length = max_length
-        self.samples = self.load_dataset("json", data_files=jsonl_path, split = "train")
+        self.samples = load_dataset("json", data_files=jsonl_path, split = "train")
         self.bos_id = tokenizer(f"{tokenizer.bos_token}assistant\n", add_special_tokens = False).input_ids
         self.eos_id = tokenizer(f"{tokenizer.eos_token}\n", add_special_tokens = False).input_ids
     def __len__(self):
         return len(self.samples)
     
     def create_chat_prompt(self, conversations):
-        messages = conversations.copy()
-        tools = (
-            conversations[0]['function']
-            if (
-                conversations
-                and conversations[0].get("role")!= "system"
-                and conversations[0].get("function")
-            ) else None
-        )
-        return self.tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False, tools = tools)
-    
+        result = []
+        for msg in conversations:
+            role = msg.get("role", "user")
+            content = msg.get("content", "")
+            result.append(f"<|im_start|>{role}\n{content}<|im_end|>")
+        result.append("<|im_start|>assistant\n")
+        return "\n".join(result)
+
+
     def generate_labels(self, input_ids):
         # 让所有input_id 都为 -100
         labels = [-100] * len(input_ids)
@@ -144,7 +142,7 @@ class SFTDataset(Dataset):
     def __getitem__(self, index):
         sample = self.samples[index]
         # 是否需要添加随机syetem_prompt
-        conversations = pre_processing_chat(sample['conversation'])
+        conversations = pre_processing_chat(sample['conversations'])
         # 用chat_template 把对话转为文本
         prompt = self.create_chat_prompt(conversations)
         # 清理think块
@@ -153,5 +151,8 @@ class SFTDataset(Dataset):
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
         input_ids += [self.tokenizer.pad_token_id]*(self.max_length - len(input_ids))
         # 生成label 只让assistant加入loss计算
-        labels=self.generate_labels(input_ids=)
-        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
+        labels=self.generate_labels(input_ids=input_ids)
+        attention_mask = torch.tensor(
+            torch.tensor(input_ids, dtype=torch.long) != self.tokenizer.pad_token_id
+        ).long()
+        return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long), attention_mask
