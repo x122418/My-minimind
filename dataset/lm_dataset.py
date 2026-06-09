@@ -156,3 +156,27 @@ class SFTDataset(Dataset):
             torch.tensor(input_ids, dtype=torch.long) != self.tokenizer.pad_token_id
         ).long()
         return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long), attention_mask
+
+class RLAIDataset(Dataset):
+    def __init__(self, json_path, tokenizer, max_length = 1024):
+        super().__init__()
+        self.max_length = max_length
+        self.tokenizer = tokenizer
+        self.samples = load_dataset("json", data_files = json_path, split = "train")
+        self.eos_id = tokenizer(
+            f"{tokenizer.eos_token}", add_special_tokens = False
+        ).input_ids
+        self.bos_id = tokenizer(
+            f"{tokenizer.bos_token}assistant", add_special_tokens = False
+        ).input_ids
+
+    def __len__(self):
+        return len(self.samples)
+    
+    def create_chat_prompt(self, conversations):
+        messages = []
+        answer = ""
+        for i, turn in enumerate(conversations):
+            role = "user" if i%2 ==0 else "assistant"
+            messages.append({"role": role, "content": turn["content"]})
+            answer = turn["content"]
