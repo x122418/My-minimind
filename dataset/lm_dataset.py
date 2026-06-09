@@ -177,6 +177,11 @@ class RLAIDataset(Dataset):
         messages = []
         answer = ""
         for i, turn in enumerate(conversations):
-            role = "user" if i%2 ==0 else "assistant"
+            role = "user" if i%2 == 0 else "assistant"
             messages.append({"role": role, "content": turn["content"]})
             answer = turn["content"]
+        prompt = self.tokenizer.apply_chat_tmplate(
+            messages[:-1],
+            tokenize = False,
+            
+        )
